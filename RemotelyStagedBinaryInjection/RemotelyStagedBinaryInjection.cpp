@@ -4,6 +4,7 @@
 #include "debug.h"
 #include "native.h"
 
+#define NtCurrentHeap()            *(PVOID *)((DWORD_PTR)__readgsqword(0x60) + 0x30) //ProcessHeap
 
 HMODULE GetMod(IN LPCWSTR modName) {
 	HMODULE hModule = NULL;
@@ -97,7 +98,8 @@ int main(int argc, char* argv[]) {
 
 	LOG_SUCCESS("successfully opened a handle to the provided URL!");
 
-	// create heap and commit it immediately
+	/*
+	create heap and commit it immediately
 	hTmpHeap = (PBYTE)meowCreateHeap(HEAP_GROWABLE, NULL, 1024, 2048, NULL, NULL);
 
 	if (hTmpHeap == NULL) {
@@ -108,15 +110,12 @@ int main(int argc, char* argv[]) {
 	}
 
 	LOG_SUCCESS("successfully created temporary heap");
-	LOG_DEBUG("HeapHandle: %p", hTmpHeap);
-	LOG_DEBUG("Flags: HEAP_ZERO_MEMORY");
-	LOG_DEBUG("Size: 1024");
+	*/
+
+	hTmpHeap = NtCurrentHeap();
+
 	// allocate memory in the heap
-	LOG_DEBUG("TEST %ld", GetLastError());
 	pTmpBytes = (PBYTE)meowAllocateHeap(hTmpHeap, HEAP_ZERO_MEMORY, 1024);
-	LOG_DEBUG("TEST %ld", GetLastError());
-	// allocate 1024 bytes to temporary buffer (outdated)
-	// pTmpBytes = (PBYTE)LocalAlloc(LPTR, 1024);
 
 	if (pTmpBytes == NULL) {
 		LOG_ERROR("failed to allocate memory in temporary heap, Error: %ld", GetLastError());
